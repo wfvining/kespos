@@ -3,6 +3,7 @@
 -compile(export_all).
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("stdlib/include/assert.hrl").
 
 suite() ->
     [{timetrap, {seconds, 5}}].
@@ -31,4 +32,33 @@ submit_bid(Config) ->
             ct:fail("got unexpected message ~p", [Any])
     after 2000 ->
         ct:fail("timeout waiting for auction results")
+    end.
+
+multi_proc(Config) ->
+    Auction = ?config(auction, Config),
+    Self = self(),
+    Pids = [spawn_link(fun() ->
+                          timer:sleep(X * 10),
+                          gen_auction:bid(Auction, X),
+                          receive
+                              {gen_auction, Auction, {loser, X, [], Max}} ->
+                                  ?assert(X < Max),
+                                  Self ! 0;
+                              {gen_auction, Auction, {winner, X, [], Max}} ->
+                                  ?assert(X =:= Max),
+                                  Self ! 1
+                          end
+                       end)
+            || X <- lists:seq(2, 10, 2)],
+    timer:sleep(200),
+    rejected = gen_auction:bid(Auction, 8),
+    gen_auction:clear(Auction),
+    ?assertEqual(1, lists:sum([receive N -> N end || _Pid <- Pids])),
+    receive
+        {gen_auction, Auction, Result} ->
+            ct:fail("received unexpected auction result message ~p", [Result]);
+        Any ->
+            ct:fail("received unexpected message ~p", [Any])
+    after 10 ->
+            ok
     end.
