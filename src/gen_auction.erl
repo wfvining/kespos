@@ -7,7 +7,7 @@ A generic auction behavior.
 
 -export([start_link/3, start_link/4, stop/1]).
 -export([bid/2, bid/3, ask/2, ask/3, clear/1]).
--export([init/1, handle_call/3, handle_cast/2]).
+-export([init/1, handle_call/3, handle_cast/2, handle_continue/2]).
 
 -export_type([auctionid/0, bidid/0, bid/0, bid/1, ask/0, ask/1, option/0, bidresponse/0]).
 
@@ -61,18 +61,25 @@ when
 -doc """
 Determine winning bids.
 
-The elements from `Bids` and the elements from `Asks` that are winners
-are returned. Any bid or ask that is not returned is considered a
-looser.
+The `Result` returned by this callbacks lists the winning bids (ans
+asks). Instead of a list of winners, a tuple may be returned which
+includes a list of winning bids/asks and a list of bids/asks that
+should be retained. Bids and asks that are retained are included in
+future calls to `c:clear/3`. Any bid or ask which is not listed as
+retained is removed from the auction. The lists of winning and
+retained bids/asks *may* overlap, allowing for a bid to win and be
+retained for consideration in future rounds of the auction. Returning
+only a list of winners is equivalent to returning `{Winners, []}`
+indicating that no bids should be retained after the auction round is
+complete.
 """.
--callback clear(Bids :: [Bid], Asks :: [Ask], State :: any()) ->
-    {ok, WinningBids, WinningAsks, ClearingData, NewState}
+-callback clear(Bids :: [bid()], Asks :: [ask()], State :: any()) ->
+    {cleared, Result, NewState}
     | {error, Reason :: any(), NewState}
 when
-    Bid :: bid(),
-    Ask :: ask(),
-    WinningBids :: [Bid],
-    WinningAsks :: [Ask],
+    Result :: {BidResults, AskResults, ClearingData},
+    BidResults :: [bid()] | {BidWinners :: [bid()], BidsRetained :: [bid()]},
+    AskResults :: [ask()] | {AskWinners :: [ask()], AsksRetained :: [ask()]},
     ClearingData :: any(),
     NewState :: any().
 
@@ -113,7 +120,9 @@ when
     auction_state :: any(),
     mode :: mode(),
     bids = #{} :: #{bidid() => {any(), any(), pid()}},
-    bidders = #{} :: #{pid() => bidid()}
+    bidders = #{} :: #{pid() => bidid()},
+    asks = #{} :: #{bidid() => {any(), any(), pid()}},
+    askers = #{} :: #{pid() => bidid()}
 }).
 
 -doc """
@@ -243,11 +252,17 @@ handle_call(
     Alias = maps:get(BidderPid, State#state.bidders),
     case Module:handle_bid({BidderAlias, Bid}, Metadata, AuctionState) of
         {accepted, NewAuctionState, [clear]} ->
-            NewState = State#state{auction_state = NewAuctionState},
+            NewState = State#state{
+                auction_state = NewAuctionState,
+                bids = maps:remove(Alias, State#state.bids)
+            },
             {reply, {updated, Alias}, store_bid(BidderPid, BidderAlias, Bid, Metadata, NewState),
                 {continue, clear}};
         {accepted, NewAuctionState} ->
-            NewState = State#state{auction_state = NewAuctionState},
+            NewState = State#state{
+                auction_state = NewAuctionState,
+                bids = maps:remove(Alias, State#state.bids)
+            },
             {reply, {updated, Alias}, store_bid(BidderPid, BidderAlias, Bid, Metadata, NewState)};
         {rejected, NewAuctionState, [clear]} ->
             {reply, rejected, State#state{auction_state = NewAuctionState}, {continue, clear}};
@@ -258,9 +273,92 @@ handle_call(_, _From, State) ->
     %% Unconditionally reject duplicate bids.
     {reply, rejected, State}.
 
-handle_cast(_Cast, State) ->
-    %% TODO
-    {noreply, State}.
+handle_continue(clear, #state{module = Module} = State) ->
+    Bids = [{BidAlias, Bid} || {BidAlias, {Bid, _, _}} <- maps:to_list(State#state.bids)],
+    Asks = [{AskAlias, Ask} || {AskAlias, {Ask, _, _}} <- maps:to_list(State#state.asks)],
+    case Module:clear(Bids, Asks, State#state.auction_state) of
+        {cleared, {WinningBids, WinningAsks, Data}, AuctionState} ->
+            NewState = notify_and_clear(WinningBids, WinningAsks, Data, State#state{
+                auction_state = AuctionState
+            }),
+            {noreply, NewState};
+        {error, _Reason, AuctionState} ->
+            %% TODO not sure how to handle this, or what this even means.
+            {noreply, State#state{auction_state = AuctionState}}
+    end.
+
+handle_cast(clear, State) ->
+    {noreply, State, {continue, clear}}.
+
+notify_and_clear(WinningBids, WinningAsks, Data, State) when is_list(WinningBids) ->
+    notify_and_clear({WinningBids, []}, WinningAsks, Data, State);
+notify_and_clear(WinningBids, WinningAsks, Data, State) when is_list(WinningAsks) ->
+    notify_and_clear(WinningBids, {WinningAsks, []}, Data, State);
+notify_and_clear(
+    {WinningBids, RetainedBids},
+    {WinningAsks, RetainedAsks},
+    Data,
+    #state{module = Module} = State
+) ->
+    RejectedBids = bids(State) -- WinningBids -- RetainedBids,
+    RejectedAsks = asks(State) -- WinningAsks -- RetainedAsks,
+    NewState =
+        case lists:member({notify, 6}, Module:module_info(exports)) of
+            true ->
+                {ok, AuctionState} = Module:notify(
+                    WinningBids,
+                    RejectedBids,
+                    WinningAsks,
+                    RejectedAsks,
+                    Data,
+                    State#state.auction_state
+                ),
+                State#state{auction_state = AuctionState};
+            false ->
+                notify_directly(WinningBids, RejectedBids, WinningAsks, RejectedAsks, Data, State)
+        end,
+    clear_bids(RetainedBids, RetainedAsks, NewState).
+
+asks(#state{asks = Asks}) ->
+    get_bids(Asks).
+
+bids(#state{bids = Bids}) ->
+    get_bids(Bids).
+
+get_bids(Map) ->
+    [{Alias, Bid} || {Alias, {Bid, _, _}} <- maps:to_list(Map)].
+
+notify_directly(WinningBids, RejectedBids, WinningAsks, RejectedAsks, Data, State) ->
+    Notify = fun(Winners, Losers) ->
+        fun(Alias, {Bid, Metadata, _}) ->
+            maybe
+                true ?= (not lists:keymember(Bid, 2, Winners)) orelse winner,
+                true ?= (not lists:keymember(Bid, 2, Losers)) orelse loser,
+                ok
+            else
+                Outcome ->
+                    Alias ! {gen_auction, self(), {Outcome, Bid, Metadata, Data}}
+            end
+        end
+    end,
+    maps:foreach(Notify(WinningBids, RejectedBids), State#state.bids),
+    maps:foreach(Notify(WinningAsks, RejectedAsks), State#state.asks),
+    State.
+
+clear_bids(RetainedBids, RetainedAsks, State) ->
+    BidAliases = [Alias || {Alias, _} <- RetainedBids],
+    AskAliases = [Alias || {Alias, _} <- RetainedAsks],
+    Bids = maps:with(BidAliases, State#state.bids),
+    Asks = maps:with(AskAliases, State#state.asks),
+    Bidders = maps:with(
+        [element(3, maps:get(Alias, State#state.bids)) || Alias <- BidAliases],
+        State#state.bidders
+    ),
+    Askers = maps:with(
+        [element(3, maps:get(Alias, State#state.asks)) || Alias <- AskAliases],
+        State#state.askers
+    ),
+    State#state{bids = Bids, asks = Asks, bidders = Bidders, askers = Askers}.
 
 store_bid(Bidder, BidderAlias, Bid, Metadata, #state{bids = Bids, bidders = Bidders} = State) ->
     NewBids = Bids#{BidderAlias => {Bid, Metadata, Bidder}},

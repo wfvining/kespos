@@ -19,7 +19,7 @@ handle_bid(_, _Metadata, State) ->
     {rejected, State}.
 
 clear(_, _, {Last, _, Reserve} = State) when Last < Reserve ->
-    {ok, [], [], Reserve, State};
+    {cleared, {[], [], Reserve}, State};
 clear(Bids, _, {Last, _, _} = State) ->
-    [Winner | _] = lists:keysort(2, Bids),
-    {ok, [Winner], [], Last, State}.
+    [Winner | _] = lists:reverse(lists:keysort(2, Bids)),
+    {cleared, {[Winner], [], Last}, State}.
