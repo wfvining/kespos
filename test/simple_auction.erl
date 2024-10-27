@@ -2,11 +2,14 @@
 
 -behaviour(gen_auction).
 
--export([start_link/2]).
+-export([start_link/2, start_link/3]).
 -export([init/1, handle_bid/3, clear/3]).
 
 start_link(Reserve, Increment) ->
-    gen_auction:start_link(?MODULE, {Reserve, Increment}, []).
+    start_link(Reserve, Increment, []).
+
+start_link(Reserve, Increment, Options) ->
+    gen_auction:start_link(?MODULE, {Reserve, Increment}, Options).
 
 init({Reserve, Increment}) ->
     {ok, {0, Increment, Reserve}}.
