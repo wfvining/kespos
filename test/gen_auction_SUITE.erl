@@ -10,13 +10,15 @@ suite() ->
 
 init_per_group(Name, Config) ->
     {Bids, ExpectedStatus, ExpectedResult, ExpectedBid, ExpectedMax} = expected(Name),
-    [{options, [{duplicate, Name}]},
-     {bids, Bids},
-     {expected, ExpectedStatus},
-     {result, ExpectedResult},
-     {bid, ExpectedBid},
-     {max, ExpectedMax}
-    |Config].
+    [
+        {options, [{duplicate, Name}]},
+        {bids, Bids},
+        {expected, ExpectedStatus},
+        {result, ExpectedResult},
+        {bid, ExpectedBid},
+        {max, ExpectedMax}
+        | Config
+    ].
 
 expected(reject) ->
     Bids = [1, 2, 3, 10, 11],
@@ -60,38 +62,44 @@ end_per_testcase(_Case, Config) ->
     gen_auction:stop(?config(auction, Config)).
 
 all() ->
-    [{group, reject},
-     {group, allow},
-     {group, update}].
+    [
+        {group, reject},
+        {group, allow},
+        {group, update}
+    ].
 
 groups() ->
-    [{reject, [parallel], [duplicates, multi_proc]},
-     {allow, [parallel], [duplicates, multi_proc]},
-     {update, [parallel], [duplicates, multi_proc]}].
+    [
+        {reject, [parallel], [duplicates, multi_proc]},
+        {allow, [parallel], [duplicates, multi_proc]},
+        {update, [parallel], [duplicates, multi_proc]}
+    ].
 
 duplicates() ->
     [{doc, "handling of duplicate bids"}].
 duplicates(Config) ->
     Auction = ?config(auction, Config),
-    [?assertEqual(Expect, gen_auction:bid(Auction, X))
-     || {Expect, X} <- lists:zip(?config(expected, Config), ?config(bids, Config))],
+    [
+        ?assertEqual(Expect, gen_auction:bid(Auction, X))
+     || {Expect, X} <- lists:zip(?config(expected, Config), ?config(bids, Config))
+    ],
     gen_auction:clear(Auction),
     Max = max(?config(max, Config), ?config(reserve, Config)),
     ct:pal("Max = ~p", [Max]),
     [
-     receive
-         {gen_auction, Auction, {Result, Bid, [], Max}} -> ok;
-         Any -> ct:fail("got unexpecte message ~p", [Any])
-     after 500 ->
+        receive
+            {gen_auction, Auction, {Result, Bid, [], Max}} -> ok;
+            Any -> ct:fail("got unexpecte message ~p", [Any])
+        after 500 ->
             ct:fail("timeout waiting for auction result")
-     end
+        end
      || {Result, Bid} <- lists:zip(?config(result, Config), ?config(bid, Config))
     ],
     receive
         Any ->
-             ct:fail("got unexpected message ~p", [Any])
+            ct:fail("got unexpected message ~p", [Any])
     after 10 ->
-            ok
+        ok
     end.
 
 multi_proc() ->
@@ -99,28 +107,38 @@ multi_proc() ->
 multi_proc(Config) ->
     Auction = ?config(auction, Config),
     Self = self(),
-    Pids = [spawn_link(fun() ->
-                          timer:sleep(X * 10),
-                          gen_auction:bid(Auction, X),
-                          receive
-                              {gen_auction, Auction, {loser, X, [], Max}} ->
-                                  ?assert(X < Max),
-                                  Self ! {self(), 0};
-                              {gen_auction, Auction, {winner, X, [], Max}} ->
-                                  ?assert(X =:= Max),
-                                  Self ! {self(), 1}
-                          end
-                       end)
-            || X <- lists:seq(2, 10, 2)],
+    Pids = [
+        spawn_link(fun() ->
+            timer:sleep(X * 10),
+            gen_auction:bid(Auction, X),
+            receive
+                {gen_auction, Auction, {loser, X, [], Max}} ->
+                    ?assert(X < Max),
+                    Self ! {self(), 0};
+                {gen_auction, Auction, {winner, X, [], Max}} ->
+                    ?assert(X =:= Max),
+                    Self ! {self(), 1}
+            end
+        end)
+     || X <- lists:seq(2, 10, 2)
+    ],
     timer:sleep(200),
     rejected = gen_auction:bid(Auction, 8),
     gen_auction:clear(Auction),
-    ?assertEqual(1, lists:sum([receive {Pid, N} -> N end || Pid <- Pids])),
+    ?assertEqual(
+        1,
+        lists:sum([
+            receive
+                {Pid, N} -> N
+            end
+         || Pid <- Pids
+        ])
+    ),
     receive
         {gen_auction, Auction, Result} ->
             ct:fail("received result for rejected bid ~p", [Result]);
         Any ->
             ct:fail("received unexpected message ~p", [Any])
     after 10 ->
-            ok
+        ok
     end.
