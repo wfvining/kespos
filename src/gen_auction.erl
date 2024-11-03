@@ -205,7 +205,16 @@ Submit an ask to the auction.
 -spec ask(Auction :: auctionid(), Ask :: any(), Metadata :: any()) -> bidresponse().
 ask(Auction, Ask, Metadata) ->
     Alias = alias([reply]),
-    gen_server:call(Auction, {ask, Ask, Metadata, Alias}).
+    case gen_server:call(Auction, {ask, Ask, Metadata, self(), Alias}) of
+        {updated, OldAlias} ->
+            unalias(OldAlias),
+            updated;
+        rejected ->
+            unalias(Alias),
+            rejected;
+        accepted ->
+            accepted
+    end.
 
 -doc """
 Stop the auction process.
@@ -221,59 +230,49 @@ init({Module, InitArg, Options}) ->
         {error, Reason} -> {stop, Reason}
     end.
 
-handle_call(
-    {bid, Bid, Metadata, BidderPid, BidderAlias},
-    _From,
-    #state{module = Module, auction_state = AuctionState} = State
-) when
-    not (is_map_key(BidderPid, State#state.bidders));
-    State#state.mode =:= allow
-->
-    case Module:handle_bid({BidderAlias, Bid}, Metadata, AuctionState) of
-        {accepted, NewAuctionState, [clear]} ->
-            NewState = State#state{auction_state = NewAuctionState},
-            {reply, accepted, store_bid(BidderPid, BidderAlias, Bid, Metadata, NewState),
-                {continue, clear}};
-        {accepted, NewAuctionState} ->
-            NewState = State#state{auction_state = NewAuctionState},
-            {reply, accepted, store_bid(BidderPid, BidderAlias, Bid, Metadata, NewState)};
-        {rejected, NewAuctionState, [clear]} ->
-            {reply, rejected, State#state{auction_state = NewAuctionState}, {continue, clear}};
-        {rejected, NewAuctionState} ->
-            {reply, rejected, State#state{auction_state = NewAuctionState}}
+handle_call({ask, Ask, Metadata, AskerPid, AskerAlias}, _From, State) ->
+    case
+        handle_bidask(
+            State#state.mode,
+            {State#state.module, handle_ask},
+            AskerPid,
+            {AskerAlias, Ask},
+            Metadata,
+            State#state.auction_state,
+            State#state.askers,
+            State#state.asks
+        )
+    of
+        {Result, AuctionState, Askers, Asks} ->
+            {reply, Result, State#state{askers = Askers, asks = Asks, auction_state = AuctionState}};
+        {Result, AuctionState, Askers, Asks, Actions} ->
+            {reply, Result, State#state{askers = Askers, asks = Asks, auction_state = AuctionState},
+                {continue, {do_actions, Actions}}}
     end;
-handle_call(
-    {bid, Bid, Metadata, BidderPid, BidderAlias},
-    _From,
-    #state{module = Module, auction_state = AuctionState} = State
-) when
-    State#state.mode =:= update
-->
-    Alias = maps:get(BidderPid, State#state.bidders),
-    case Module:handle_bid({BidderAlias, Bid}, Metadata, AuctionState) of
-        {accepted, NewAuctionState, [clear]} ->
-            NewState = State#state{
-                auction_state = NewAuctionState,
-                bids = maps:remove(Alias, State#state.bids)
-            },
-            {reply, {updated, Alias}, store_bid(BidderPid, BidderAlias, Bid, Metadata, NewState),
-                {continue, clear}};
-        {accepted, NewAuctionState} ->
-            NewState = State#state{
-                auction_state = NewAuctionState,
-                bids = maps:remove(Alias, State#state.bids)
-            },
-            {reply, {updated, Alias}, store_bid(BidderPid, BidderAlias, Bid, Metadata, NewState)};
-        {rejected, NewAuctionState, [clear]} ->
-            {reply, rejected, State#state{auction_state = NewAuctionState}, {continue, clear}};
-        {rejected, NewAuctionState} ->
-            {reply, rejected, State#state{auction_state = NewAuctionState}}
-    end;
-handle_call(_, _From, State) ->
-    %% Unconditionally reject duplicate bids.
-    {reply, rejected, State}.
+handle_call({bid, Bid, Metadata, BidderPid, BidderAlias}, _From, State) ->
+    case
+        handle_bidask(
+            State#state.mode,
+            {State#state.module, handle_bid},
+            BidderPid,
+            {BidderAlias, Bid},
+            Metadata,
+            State#state.auction_state,
+            State#state.bidders,
+            State#state.bids
+        )
+    of
+        {Result, AuctionState, Bidders, Bids} ->
+            {reply, Result, State#state{
+                bidders = Bidders, bids = Bids, auction_state = AuctionState
+            }};
+        {Result, AuctionState, Bidders, Bids, Actions} ->
+            {reply, Result,
+                State#state{bidders = Bidders, bids = Bids, auction_state = AuctionState},
+                {continue, {do_acitons, Actions}}}
+    end.
 
-handle_continue(clear, #state{module = Module} = State) ->
+handle_continue({do_actions, [clear]}, #state{module = Module} = State) ->
     Bids = [{BidAlias, Bid} || {BidAlias, {Bid, _, _}} <- maps:to_list(State#state.bids)],
     Asks = [{AskAlias, Ask} || {AskAlias, {Ask, _, _}} <- maps:to_list(State#state.asks)],
     case Module:clear(Bids, Asks, State#state.auction_state) of
@@ -288,7 +287,7 @@ handle_continue(clear, #state{module = Module} = State) ->
     end.
 
 handle_cast(clear, State) ->
-    {noreply, State, {continue, clear}}.
+    {noreply, State, {continue, {do_actions, [clear]}}}.
 
 notify_and_clear(WinningBids, WinningAsks, Data, State) when is_list(WinningBids) ->
     notify_and_clear({WinningBids, []}, WinningAsks, Data, State);
@@ -360,7 +359,68 @@ clear_bids(RetainedBids, RetainedAsks, State) ->
     ),
     State#state{bids = Bids, asks = Asks, bidders = Bidders, askers = Askers}.
 
-store_bid(Bidder, BidderAlias, Bid, Metadata, #state{bids = Bids, bidders = Bidders} = State) ->
-    NewBids = Bids#{BidderAlias => {Bid, Metadata, Bidder}},
-    NewBidders = Bidders#{Bidder => BidderAlias},
-    State#state{bids = NewBids, bidders = NewBidders}.
+handle_bidask(
+    Mode,
+    {Module, Handler},
+    Pid,
+    {Alias, BidAskVal} = BidAsk,
+    Metadata,
+    AuctionState,
+    Pids,
+    BidAsks
+) when
+    not is_map_key(Pid, Pids);
+    Mode =:= allow
+->
+    case Module:Handler(BidAsk, Metadata, AuctionState) of
+        {accepted, NewAuctionState} ->
+            {accepted, NewAuctionState, Pids#{Pid => Alias}, BidAsks#{
+                Alias => {BidAskVal, Metadata, Pid}
+            }};
+        {accepted, NewAuctionState, Actions} ->
+            {accepted, NewAuctionState, Pids#{Pid => Alias},
+                BidAsks#{Alias => {BidAskVal, Metadata, Pid}}, Actions};
+        {rejected, NewAuctionState} ->
+            {rejected, NewAuctionState, Pids, BidAsks};
+        {rejected, NewAuctionState, Actions} ->
+            {rejected, NewAuctionState, Pids, BidAsks, Actions}
+    end;
+handle_bidask(
+    update,
+    {Module, Handler},
+    Pid,
+    {Alias, BidAskVal} = BidAsk,
+    Metadata,
+    AuctionState,
+    Pids,
+    BidAsks
+) ->
+    case Module:Handler(BidAsk, Metadata, AuctionState) of
+        {accepted, NewAuctionState} when is_map_key(Pid, Pids) ->
+            OldAlias = maps:get(Pid, Pids),
+            {{updated, OldAlias}, NewAuctionState, Pids#{Pid => Alias}, BidAsks#{
+                Alias => {BidAskVal, Metadata, Pid}
+            }};
+        {accepted, NewAuctionState, Actions} when is_map_key(Pid, Pids) ->
+            OldAlias = maps:get(Pid, Pids),
+            {
+                {updated, OldAlias},
+                NewAuctionState,
+                Pids#{Pid => Alias},
+                BidAsks#{Alias => {BidAskVal, Metadata, Pid}},
+                Actions
+            };
+        {accepted, NewAuctionState} ->
+            {accepted, NewAuctionState, Pids#{Pid => Alias}, BidAsks#{
+                Alias => {BidAskVal, Metadata, Pid}
+            }};
+        {accepted, NewAuctionState, Actions} ->
+            {accepted, NewAuctionState, Pids#{Pid => Alias},
+                BidAsks#{Alias => {BidAskVal, Metadata, Pid}}, Actions};
+        {rejected, NewAuctionState} ->
+            {rejected, NewAuctionState, Pids, BidAsks};
+        {rejected, NewAuctionState, Actions} ->
+            {rejected, NewAuctionState, Pids, BidAsks, Actions}
+    end;
+handle_bidask(reject, _ModFun, _Pid, _BidAsk, _Metadata, AuctionState, Pids, BidAsks) ->
+    {rejected, AuctionState, Pids, BidAsks}.

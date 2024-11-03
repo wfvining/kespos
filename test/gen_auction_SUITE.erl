@@ -8,6 +8,8 @@
 suite() ->
     [{timetrap, {seconds, 5}}].
 
+init_per_group(Name, Config) when Name =:= bid; Name =:= ask ->
+    [{bidask, Name} | Config];
 init_per_group(Name, Config) ->
     {Bids, ExpectedStatus, ExpectedResult, ExpectedBid, ExpectedMax} = expected(Name),
     [
@@ -62,14 +64,12 @@ end_per_testcase(_Case, Config) ->
     gen_auction:stop(?config(auction, Config)).
 
 all() ->
-    [
-        {group, reject},
-        {group, allow},
-        {group, update}
-    ].
+    [{group, bid}, {group, ask}].
 
 groups() ->
     [
+        {bid, [parallel], [{group, reject}, {group, allow}, {group, update}]},
+        {ask, [parallel], [{group, reject}, {group, allow}, {group, update}]},
         {reject, [parallel], [duplicates, multi_proc]},
         {allow, [parallel], [duplicates, multi_proc]},
         {update, [parallel], [duplicates, multi_proc]}
@@ -78,14 +78,14 @@ groups() ->
 duplicates() ->
     [{doc, "handling of duplicate bids"}].
 duplicates(Config) ->
+    BidAsk = ?config(bidask, Config),
     Auction = ?config(auction, Config),
     [
-        ?assertEqual(Expect, gen_auction:bid(Auction, X))
+        ?assertEqual(Expect, gen_auction:BidAsk(Auction, X))
      || {Expect, X} <- lists:zip(?config(expected, Config), ?config(bids, Config))
     ],
     gen_auction:clear(Auction),
     Max = max(?config(max, Config), ?config(reserve, Config)),
-    ct:pal("Max = ~p", [Max]),
     [
         receive
             {gen_auction, Auction, {Result, Bid, [], Max}} -> ok;
@@ -105,12 +105,13 @@ duplicates(Config) ->
 multi_proc() ->
     [{doc, "Bids from multiple processes are handled"}].
 multi_proc(Config) ->
+    BidAsk = ?config(bidask, Config),
     Auction = ?config(auction, Config),
     Self = self(),
     Pids = [
         spawn_link(fun() ->
             timer:sleep(X * 10),
-            gen_auction:bid(Auction, X),
+            gen_auction:BidAsk(Auction, X),
             receive
                 {gen_auction, Auction, {loser, X, [], Max}} ->
                     ?assert(X < Max),
@@ -123,7 +124,7 @@ multi_proc(Config) ->
      || X <- lists:seq(2, 10, 2)
     ],
     timer:sleep(200),
-    rejected = gen_auction:bid(Auction, 8),
+    rejected = gen_auction:BidAsk(Auction, 8),
     gen_auction:clear(Auction),
     ?assertEqual(
         1,
