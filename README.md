@@ -46,8 +46,8 @@ but may be added in the future.
   bid before actually bidding.
 
 The final significant capability that `gen_auction` tries to provide
-is handling of duplicate bids. By default id a single process submits
-two or more bids, the duplicate bid is treated an update to the
+is handling of duplicate bids. By default if a single process submits
+two or more bids, the duplicate bid is treated as an update to the
 previous bid from the same process. Alternative modes where duplicates
 are allowed (without being considered updates) or are rejected
 unconditionally are also supported.
