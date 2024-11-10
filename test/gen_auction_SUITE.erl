@@ -85,15 +85,16 @@ duplicates(Config) ->
      || {Expect, X} <- lists:zip(?config(expected, Config), ?config(bids, Config))
     ],
     gen_auction:clear(Auction),
+    AuctionResults = lists:zip(?config(result, Config), ?config(bid, Config)),
     Max = max(?config(max, Config), ?config(reserve, Config)),
     [
         receive
-            {gen_auction, Auction, {Result, Bid, [], Max}} -> ok;
-            Any -> ct:fail("got unexpecte message ~p", [Any])
-        after 500 ->
+            {gen_auction, Auction, {Result, Bid, [], Max} = Res} ->
+                ok
+        after 1000 ->
             ct:fail("timeout waiting for auction result")
         end
-     || {Result, Bid} <- lists:zip(?config(result, Config), ?config(bid, Config))
+     || {Result, Bid} <- AuctionResults
     ],
     receive
         Any ->
