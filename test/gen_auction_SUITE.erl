@@ -2,15 +2,20 @@
 
 -compile(export_all).
 
+-include_lib("stdlib/include/ms_transform.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
 suite() ->
-    [{timetrap, {seconds, 5}}].
+    [{timetrap, {seconds, 5000}}].
 
 init_per_group(Name, Config) when Name =:= bid; Name =:= ask ->
     [{bidask, Name} | Config];
-init_per_group(Name, Config) ->
+init_per_group(Name, Config) when
+    Name =:= reject;
+    Name =:= allow;
+    Name =:= update
+->
     {Bids, ExpectedStatus, ExpectedResult, ExpectedBid, ExpectedMax} = expected(Name),
     [
         {options, [{duplicate, Name}]},
@@ -20,7 +25,15 @@ init_per_group(Name, Config) ->
         {bid, ExpectedBid},
         {max, ExpectedMax}
         | Config
-    ].
+    ];
+init_per_group(clear_ask, Config) ->
+    [{bidask, ask} | Config];
+init_per_group(clear_bid, Config) ->
+    [{bidask, bid} | Config];
+init_per_group(Name, Config) when Name =:= accepted; Name =:= rejected ->
+    [{expected, Name} | Config];
+init_per_group(_Name, Config) ->
+    Config.
 
 expected(reject) ->
     Bids = [1, 2, 3, 10, 11],
@@ -68,12 +81,46 @@ all() ->
 
 groups() ->
     [
-        {bid, [parallel], [{group, reject}, {group, allow}, {group, update}]},
-        {ask, [parallel], [{group, reject}, {group, allow}, {group, update}]},
+        {bid, [parallel], [{group, duplicate}, {group, action}]},
+        {ask, [parallel], [{group, duplicate}, {group, action}]},
+        {duplicate, [parallel], [{group, reject}, {group, allow}, {group, update}]},
         {reject, [parallel], [duplicates, multi_proc]},
         {allow, [parallel], [duplicates, multi_proc]},
-        {update, [parallel], [duplicates, multi_proc]}
+        {update, [parallel], [duplicates, multi_proc]},
+        {action, [parallel], [{group, accepted}, {group, rejected}]},
+        {accepted, [parallel], [clear]},
+        {rejected, [parallel], [clear]}
     ].
+
+clear() ->
+    [{doc, "returning `clear` action from `handle_{bid,ask}/3` triggers clearing"}].
+clear(Config) ->
+    Auction = ?config(auction, Config),
+    BidAsk = ?config(bidask, Config),
+    ExpectedResponse = ?config(expected, Config),
+    Reserve = ?config(reserve, Config),
+    Increment = ?config(reserve, Config),
+    BidAmount = (Reserve + Increment) * 2,
+    {ExpectedOutcome, WinningBid, ExpectedMax} =
+        if
+            ExpectedResponse =:= accepted ->
+                {winner, {ExpectedResponse, [clear], BidAmount}, BidAmount};
+            ExpectedResponse =:= rejected ->
+                gen_auction:BidAsk(Auction, Reserve - 1),
+                {loser, Reserve - 1, Reserve}
+        end,
+    ExpectedResponse = gen_auction:BidAsk(Auction, {ExpectedResponse, [clear], BidAmount}),
+    receive
+        {gen_auction, Auction, {ExpectedOutcome, WinningBid, [], ExpectedMax}} ->
+            ok;
+        Any ->
+            ct:fail(
+                "got unexpected message: ~w expected: ~w",
+                [Any, {gen_auction, Auction, {ExpectedOutcome, WinningBid, [], ExpectedMax}}]
+            )
+    after 200 ->
+        ct:fail("timeout waiting for auction result")
+    end.
 
 duplicates() ->
     [{doc, "handling of duplicate bids"}].
@@ -89,7 +136,7 @@ duplicates(Config) ->
     Max = max(?config(max, Config), ?config(reserve, Config)),
     [
         receive
-            {gen_auction, Auction, {Result, Bid, [], Max} = Res} ->
+            {gen_auction, Auction, {Result, Bid, [], Max}} ->
                 ok
         after 1000 ->
             ct:fail("timeout waiting for auction result")

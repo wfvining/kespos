@@ -269,7 +269,7 @@ handle_call({bid, Bid, Metadata, BidderPid, BidderAlias}, _From, State) ->
         {Result, AuctionState, Bidders, Bids, Actions} ->
             {reply, Result,
                 State#state{bidders = Bidders, bids = Bids, auction_state = AuctionState},
-                {continue, {do_acitons, Actions}}}
+                {continue, {do_actions, Actions}}}
     end.
 
 handle_continue({do_actions, [clear]}, #state{module = Module} = State) ->
