@@ -26,7 +26,7 @@ init({Reserve, Increment}) ->
 
 handle_bid({_BidId, {accepted, Actions, BidAmount}}, _Metadata, {_Last, Increment, Reserve}) ->
     {accepted, {BidAmount, Increment, Reserve}, Actions};
-handle_bid({_BidId, {rejected, Actions, BidAmount}}, _Metadata, {Last, Increment, Reserve}) ->
+handle_bid({_BidId, {rejected, Actions, _BidAmount}}, _Metadata, {Last, Increment, Reserve}) ->
     {rejected, {Last, Increment, Reserve}, Actions};
 handle_bid({_BidId, BidAmount}, _Metadata, {Last, Increment, Reserve}) when
     BidAmount - Increment >= Last
