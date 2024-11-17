@@ -272,31 +272,46 @@ handle_call({bid, Bid, Metadata, BidderPid, BidderAlias}, _From, State) ->
                 {continue, {do_actions, Actions}}}
     end.
 
-handle_continue({do_actions, [clear]}, #state{module = Module} = State) ->
-    Bids = [{BidAlias, Bid} || {BidAlias, {Bid, _, _}} <- maps:to_list(State#state.bids)],
-    Asks = [{AskAlias, Ask} || {AskAlias, {Ask, _, _}} <- maps:to_list(State#state.asks)],
-    case Module:clear(Bids, Asks, State#state.auction_state) of
-        {cleared, {WinningBids, WinningAsks, Data}, AuctionState} ->
-            NewState = notify_and_clear(WinningBids, WinningAsks, Data, State#state{
-                auction_state = AuctionState
-            }),
-            {noreply, NewState};
-        {error, _Reason, AuctionState} ->
-            %% TODO not sure how to handle this, or what this even means.
-            {noreply, State#state{auction_state = AuctionState}}
-    end.
+handle_continue({do_actions, Actions}, State) ->
+    {noreply, do_actions(Actions, State)}.
 
 handle_cast(clear, State) ->
     {noreply, State, {continue, {do_actions, [clear]}}}.
 
-notify_and_clear(WinningBids, WinningAsks, Data, State) when is_list(WinningBids) ->
-    notify_and_clear({WinningBids, []}, WinningAsks, Data, State);
-notify_and_clear(WinningBids, WinningAsks, Data, State) when is_list(WinningAsks) ->
-    notify_and_clear(WinningBids, {WinningAsks, []}, Data, State);
+do_actions([], State) ->
+    State;
+do_actions([Action | Rest] = Actions, State) ->
+    case lists:member(clear, Actions) of
+        true ->
+            {MoreActions, NewState} = do_clear(State),
+            do_actions(lists:delete(clear, Actions) ++ MoreActions, NewState);
+        false ->
+            do_actions(Rest, do_action(Action, State))
+    end.
+
+do_action(_Action, State) ->
+    %% TODO handle additional actions
+    State.
+
+do_clear(#state{module = Module} = State) ->
+    Bids = [{BidAlias, Bid} || {BidAlias, {Bid, _, _}} <- maps:to_list(State#state.bids)],
+    Asks = [{AskAlias, Ask} || {AskAlias, {Ask, _, _}} <- maps:to_list(State#state.asks)],
+    case Module:clear(Bids, Asks, State#state.auction_state) of
+        {cleared, Result, AuctionState} ->
+            NewState = notify_and_clear(Result, State#state{auction_state = AuctionState}),
+            {[], NewState};
+        {cleared, Result, AuctionState, Actions} ->
+            NewState = notify_and_clear(Result, State#state{auction_state = AuctionState}),
+            {Actions, NewState}
+        %% TODO handle the {error, ...} return from clear/3
+    end.
+
+notify_and_clear({WinningBids, WinningAsks, Data}, State) when is_list(WinningBids) ->
+    notify_and_clear({{WinningBids, []}, WinningAsks, Data}, State);
+notify_and_clear({WinningBids, WinningAsks, Data}, State) when is_list(WinningAsks) ->
+    notify_and_clear({WinningBids, {WinningAsks, []}, Data}, State);
 notify_and_clear(
-    {WinningBids, RetainedBids},
-    {WinningAsks, RetainedAsks},
-    Data,
+    {{WinningBids, RetainedBids}, {WinningAsks, RetainedAsks}, Data},
     #state{module = Module} = State
 ) ->
     RejectedBids = bids(State) -- WinningBids -- RetainedBids,
