@@ -335,13 +335,13 @@ handle_info({'$clear', {timeout, Ref}}, #state{timeout = {_TRef, Ref, _Time}} = 
     {noreply, State#state{timeout = undefined}, {continue, {do_actions, [clear]}}};
 handle_info({'$clear', {timeout, _}}, State) ->
     {noreply, State};
-handle_info(Message, #state{ auction_state = AuctionState, module = Module } = State) ->
+handle_info(Message, #state{auction_state = AuctionState, module = Module} = State) ->
     %% Let it crash if handle_info is not implemented
     case Module:handle_info(Message, AuctionState) of
         {ok, NewState} ->
-            {noreply, State#state{ auction_state = NewState }};
+            {noreply, State#state{auction_state = NewState}};
         {ok, NewState, Actions} ->
-            {noreply, State#state{ auction_state = NewState }, {continue, {do_actions, Actions}}}
+            {noreply, State#state{auction_state = NewState}, {continue, {do_actions, Actions}}}
     end.
 
 do_actions(Actions, State) ->
