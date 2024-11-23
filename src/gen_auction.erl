@@ -7,9 +7,9 @@ A generic auction behavior.
 
 -export([start_link/3, start_link/4, stop/1]).
 -export([bid/2, bid/3, ask/2, ask/3, clear/1]).
--export([init/1, handle_call/3, handle_cast/2, handle_continue/2]).
-
 -export_type([auctionid/0, bidid/0, bid/0, bid/1, ask/0, ask/1, option/0, bidresponse/0]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, handle_continue/2]).
+
 
 -opaque bidid() :: reference().
 -type bid(X) :: {bidid(), X}.
@@ -281,6 +281,15 @@ handle_cast(clear, State) ->
 do_actions([], State) ->
     State;
 do_actions([Action | Rest] = Actions, State) ->
+handle_info(Message, #state{ auction_state = AuctionState, module = Module } = State) ->
+    %% Let it crash if handle_info is not implemented
+    case Module:handle_info(Message, AuctionState) of
+        {ok, NewState} ->
+            {noreply, State#state{ auction_state = NewState }};
+        {ok, NewState, Actions} ->
+            {noreply, State#state{ auction_state = NewState }, {continue, {do_actions, Actions}}}
+    end.
+
     case lists:member(clear, Actions) of
         true ->
             {MoreActions, NewState} = do_clear(State),
