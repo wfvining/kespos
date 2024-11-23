@@ -13,7 +13,7 @@
 -behaviour(gen_auction).
 
 -export([start_link/2, start_link/3]).
--export([init/1, handle_bid/3, handle_ask/3, clear/3]).
+-export([init/1, handle_bid/3, handle_ask/3, clear/3, handle_info/2]).
 
 start_link(Reserve, Increment) ->
     start_link(Reserve, Increment, []).
@@ -21,6 +21,8 @@ start_link(Reserve, Increment) ->
 start_link(Reserve, Increment, Options) ->
     gen_auction:start_link(?MODULE, {Reserve, Increment}, Options).
 
+init({{timer, Time}, {Reserve, Increment}}) ->
+    {ok, {0, Increment, Reserve}, [{timer, Time}]};
 init({Reserve, Increment}) ->
     {ok, {0, Increment, Reserve}}.
 
@@ -44,6 +46,9 @@ clear(Bids, [], State) ->
 clear([], Asks, State) ->
     {Winners, Data} = do_clear(Asks, State),
     {cleared, {[], Winners, Data}, State}.
+
+handle_info(cancel_timer, State) ->
+    {ok, State, [{timer, infinity}]}.
 
 do_clear(_, {Last, _, Reserve}) when Last < Reserve ->
     {[], Reserve};

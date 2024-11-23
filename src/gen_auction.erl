@@ -7,9 +7,18 @@ A generic auction behavior.
 
 -export([start_link/3, start_link/4, stop/1]).
 -export([bid/2, bid/3, ask/2, ask/3, clear/1]).
--export_type([auctionid/0, bidid/0, bid/0, bid/1, ask/0, ask/1, option/0, bidresponse/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, handle_continue/2]).
 
+-export_type([
+    auctionid/0,
+    bidid/0,
+    bid/0, bid/1,
+    ask/0, ask/1,
+    option/0,
+    bidresponse/0,
+    clearingmode/0,
+    timermode/0
+]).
 
 -opaque bidid() :: reference().
 -type bid(X) :: {bidid(), X}.
@@ -18,13 +27,26 @@ A generic auction behavior.
 -type ask(X) :: bid(X).
 
 -type auctionid() :: pid() | gen_server:server_name().
--type action() :: clear.
+-type action() :: clear | clearingmode().
 -type bidresponse() :: accepted | rejected | updated.
--type option() :: {duplicate, mode()}.
+-type timermode() :: cancel | keep | restart.
+-type option() ::
+    {duplicate, mode()}
+    | {timer_mode, timermode()}
+    | {timeout_mode, timermode()}
+    | {clearing, clearingmode()}.
+-type clearingmode() ::
+    {bidcount, pos_integer() | infinity}
+    | {askcount, pos_integer() | infinity}
+    | {timer, pos_integer() | infinity}
+    | {timeout, pos_integer() | infinity}.
 -type mode() :: reject | update | allow.
 
 -doc "Initialize any state needed by the auction".
--callback init(Args :: any()) -> {ok, State :: any()} | {error, Reason :: any()}.
+-callback init(Args :: any()) ->
+    {ok, State :: any()}
+    | {ok, State :: any(), ClearingModes :: [clearingmode()]}
+    | {error, Reason :: any()}.
 
 -doc """
 Handle a new bid that has been submitted to the auction.
@@ -75,6 +97,7 @@ complete.
 """.
 -callback clear(Bids :: [bid()], Asks :: [ask()], State :: any()) ->
     {cleared, Result, NewState}
+    | {cleared, Result, NewState, [action()]}
     | {error, Reason :: any(), NewState}
 when
     Result :: {BidResults, AskResults, ClearingData},
@@ -122,7 +145,8 @@ when
     bids = #{} :: #{bidid() => {any(), any(), pid()}},
     bidders = #{} :: #{pid() => bidid()},
     asks = #{} :: #{bidid() => {any(), any(), pid()}},
-    askers = #{} :: #{pid() => bidid()}
+    askers = #{} :: #{pid() => bidid()},
+    timer :: undefined | {timer:tref(), reference()}
 }).
 
 -doc """
@@ -226,8 +250,14 @@ stop(Auction) ->
 init({Module, InitArg, Options}) ->
     Mode = proplists:get_value(duplicate, Options, update),
     case Module:init(InitArg) of
-        {ok, State} -> {ok, #state{module = Module, auction_state = State, mode = Mode}};
-        {error, Reason} -> {stop, Reason}
+        %% TODO handle actions returned by init
+        {ok, State} ->
+            {ok, #state{module = Module, auction_state = State, mode = Mode}};
+        {ok, State, ClearingModes} ->
+            State1 = #state{module = Module, auction_state = State, mode = Mode},
+            {ok, set_clearing_mode(ClearingModes, State1)};
+        {error, Reason} ->
+            {stop, Reason}
     end.
 
 handle_call({ask, Ask, Metadata, AskerPid, AskerAlias}, _From, State) ->
@@ -278,9 +308,12 @@ handle_continue({do_actions, Actions}, State) ->
 handle_cast(clear, State) ->
     {noreply, State, {continue, {do_actions, [clear]}}}.
 
-do_actions([], State) ->
-    State;
-do_actions([Action | Rest] = Actions, State) ->
+handle_info({'$clear', {timer, Ref}}, #state{timer = {_TRef, Ref}} = State) ->
+    %% TODO restart timers???
+    {noreply, State#state{timer = undefined}, {continue, {do_actions, [clear]}}};
+handle_info({'$clear', {timer, _}}, State) ->
+    %% Ref doesn't match so this is a message from a canceled timer. Ignore.
+    {noreply, State};
 handle_info(Message, #state{ auction_state = AuctionState, module = Module } = State) ->
     %% Let it crash if handle_info is not implemented
     case Module:handle_info(Message, AuctionState) of
@@ -290,17 +323,14 @@ handle_info(Message, #state{ auction_state = AuctionState, module = Module } = S
             {noreply, State#state{ auction_state = NewState }, {continue, {do_actions, Actions}}}
     end.
 
+do_actions(Actions, State) ->
     case lists:member(clear, Actions) of
         true ->
             {MoreActions, NewState} = do_clear(State),
             do_actions(lists:delete(clear, Actions) ++ MoreActions, NewState);
         false ->
-            do_actions(Rest, do_action(Action, State))
+            set_clearing_mode(Actions, State)
     end.
-
-do_action(_Action, State) ->
-    %% TODO handle additional actions
-    State.
 
 do_clear(#state{module = Module} = State) ->
     Bids = [{BidAlias, Bid} || {BidAlias, {Bid, _, _}} <- maps:to_list(State#state.bids)],
@@ -314,6 +344,37 @@ do_clear(#state{module = Module} = State) ->
             {Actions, NewState}
         %% TODO handle the {error, ...} return from clear/3
     end.
+
+set_clearing_mode([], State) ->
+    State;
+set_clearing_mode([{timer, Time} | Rest], State) ->
+    set_clearing_mode(Rest, set_timer(Time, State));
+set_clearing_mode([{timeout, Time} | Rest], State) ->
+    exit('not implemented'),
+    %% TODO start a timer
+    State;
+set_clearing_mode([{bidcount, Count} | Rest], State) ->
+    exit('not implemented'),
+    %% TODO
+    State;
+set_clearing_mode([{askcount, Count} | Rest], State) ->
+    exit('not implemented'),
+    %% TODO
+    State.
+
+set_timer(infinity, State) ->
+    cancel_timer(State);
+set_timer(Time, State) ->
+    State1 = cancel_timer(State),
+    Ref = erlang:make_ref(),
+    {ok, TRef} = timer:send_after(Time, {'$clear', {timer, Ref}}),
+    State1#state{timer = {TRef, Ref}}.
+
+cancel_timer(#state{timer = {TRef, _Ref}} = State) ->
+    timer:cancel(TRef),
+    State#state{timer = undefined};
+cancel_timer(#state{timer = undefined} = State) ->
+    State.
 
 notify_and_clear({WinningBids, WinningAsks, Data}, State) when is_list(WinningBids) ->
     notify_and_clear({{WinningBids, []}, WinningAsks, Data}, State);

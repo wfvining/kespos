@@ -32,6 +32,8 @@ init_per_group(clear_bid, Config) ->
     [{bidask, bid} | Config];
 init_per_group(Name, Config) when Name =:= accepted; Name =:= rejected ->
     [{expected, Name} | Config];
+init_per_group(timer, Config) ->
+    [{time, 500}, {init, {{timer, 500}, {9, 2}}} | Config];
 init_per_group(_Name, Config) ->
     Config.
 
@@ -63,21 +65,26 @@ end_per_group(_, Config) ->
     Config.
 
 init_per_testcase(_Case, Config) ->
-    case ?config(options, Config) of
-        undefined ->
-            Options = [];
-        Options ->
-            Options = Options
-    end,
+    Options =
+        case ?config(options, Config) of
+            undefined -> [];
+            Opts -> Opts
+        end,
     Reserve = 9,
-    {ok, Pid} = gen_auction:start_link(simple_auction, {Reserve, 2}, Options),
-    [{auction, Pid}, {reserve, Reserve} | Config].
+    Init =
+        case ?config(init, Config) of
+            undefined -> {Reserve, 2};
+            Init_ -> Init_
+        end,
+    {ok, Pid} = gen_auction:start_link(simple_auction, Init, Options),
+    Start = erlang:monotonic_time(millisecond),
+    [{auction, Pid}, {reserve, Reserve}, {start, Start} | Config].
 
 end_per_testcase(_Case, Config) ->
     gen_auction:stop(?config(auction, Config)).
 
 all() ->
-    [{group, bid}, {group, ask}].
+    [{group, bid}, {group, ask}, {group, auto}].
 
 groups() ->
     [
@@ -89,8 +96,52 @@ groups() ->
         {update, [parallel], [duplicates, multi_proc]},
         {action, [parallel], [{group, accepted}, {group, rejected}]},
         {accepted, [parallel], [clear]},
-        {rejected, [parallel], [clear]}
+        {rejected, [parallel], [clear]},
+
+        {auto, [parallel], [{group, timer}]},
+        {timer, [parallel], [clear_timer, cancel_timer]}
     ].
+
+cancel_timer() ->
+    [{doc, "clearing timer is canceled by returning a `{timer, infinity}` action"}].
+cancel_timer(Config) ->
+    Auction = ?config(auction, Config),
+    Reserve = ?config(reserve, Config),
+    Time = ?config(time, Config),
+    gen_auction:bid(Auction, Reserve + 1),
+    %% use the handle_info callback in simple_auction to cancel the timer
+    Auction ! cancel_timer,
+    receive
+        Any ->
+            ct:fail("Got unexpected message: ~p", [Any])
+    after Time + 100 ->
+            ok
+    end,
+    gen_auction:clear(Auction),
+    receive
+        {gen_auction, Auction, {winner, _, _, _}} ->
+            ok
+    after 100 ->
+            ct:fail("auction was not cleared")
+    end.
+
+clear_timer() ->
+    [{doc, "returning `{timer, Time}` action from `init/1` starts a clearing timer"}].
+clear_timer(Config) ->
+    Auction = ?config(auction, Config),
+    Reserve = ?config(reserve, Config),
+    Time = ?config(time, Config),
+    Start = ?config(start, Config),
+    gen_auction:bid(Auction, Reserve + 1),
+    receive
+        {gen_auction, Auction, {winner, _, _, _}} ->
+            End = erlang:monotonic_time(millisecond),
+            Delay = End - Start,
+            %% Check that we are within 1 percent of the expected time
+            ?assert(abs(Delay - Time) < Time * 0.01)
+    after Time + 100 ->
+        ct:fail("no message received within ~p ms", Time)
+    end.
 
 clear() ->
     [{doc, "returning `clear` action from `handle_{bid,ask}/3` triggers clearing"}].
