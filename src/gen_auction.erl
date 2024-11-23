@@ -146,7 +146,8 @@ when
     bidders = #{} :: #{pid() => bidid()},
     asks = #{} :: #{bidid() => {any(), any(), pid()}},
     askers = #{} :: #{pid() => bidid()},
-    timer :: undefined | {timer:tref(), reference()}
+    timer :: undefined | {timer:tref(), reference()},
+    timeout :: undefined | {timer:tref(), reference(), pos_integer()}
 }).
 
 -doc """
@@ -274,10 +275,11 @@ handle_call({ask, Ask, Metadata, AskerPid, AskerAlias}, _From, State) ->
         )
     of
         {Result, AuctionState, Askers, Asks} ->
-            {reply, Result, State#state{askers = Askers, asks = Asks, auction_state = AuctionState}};
+            {reply, Result, State#state{askers = Askers, asks = Asks, auction_state = AuctionState},
+                {continue, {after_bidask, ask, Result, []}}};
         {Result, AuctionState, Askers, Asks, Actions} ->
             {reply, Result, State#state{askers = Askers, asks = Asks, auction_state = AuctionState},
-                {continue, {do_actions, Actions}}}
+                {continue, {after_bidask, ask, Result, Actions}}}
     end;
 handle_call({bid, Bid, Metadata, BidderPid, BidderAlias}, _From, State) ->
     case
@@ -293,15 +295,29 @@ handle_call({bid, Bid, Metadata, BidderPid, BidderAlias}, _From, State) ->
         )
     of
         {Result, AuctionState, Bidders, Bids} ->
-            {reply, Result, State#state{
-                bidders = Bidders, bids = Bids, auction_state = AuctionState
-            }};
+            {reply, Result,
+                State#state{
+                    bidders = Bidders, bids = Bids, auction_state = AuctionState
+                },
+                {continue, {after_bidask, bid, Result, []}}};
         {Result, AuctionState, Bidders, Bids, Actions} ->
             {reply, Result,
                 State#state{bidders = Bidders, bids = Bids, auction_state = AuctionState},
-                {continue, {do_actions, Actions}}}
+                {continue, {after_bidask, bid, Result, Actions}}}
     end.
 
+handle_continue({after_bidask, BidAsk, Result, Actions}, State) ->
+    NewState = do_actions(Actions, State),
+    case Result of
+        {updated, _} ->
+            %% TODO check bid/ask counts
+            {noreply, reset_timeout(NewState)};
+        accepted ->
+            %% TODO check bid/ask counts
+            {noreply, reset_timeout(NewState)};
+        rejected ->
+            {noreply, NewState}
+    end;
 handle_continue({do_actions, Actions}, State) ->
     {noreply, do_actions(Actions, State)}.
 
@@ -313,6 +329,11 @@ handle_info({'$clear', {timer, Ref}}, #state{timer = {_TRef, Ref}} = State) ->
     {noreply, State#state{timer = undefined}, {continue, {do_actions, [clear]}}};
 handle_info({'$clear', {timer, _}}, State) ->
     %% Ref doesn't match so this is a message from a canceled timer. Ignore.
+    {noreply, State};
+handle_info({'$clear', {timeout, Ref}}, #state{timeout = {_TRef, Ref, _Time}} = State) ->
+    %% TODO restart timers???
+    {noreply, State#state{timeout = undefined}, {continue, {do_actions, [clear]}}};
+handle_info({'$clear', {timeout, _}}, State) ->
     {noreply, State};
 handle_info(Message, #state{ auction_state = AuctionState, module = Module } = State) ->
     %% Let it crash if handle_info is not implemented
@@ -350,9 +371,7 @@ set_clearing_mode([], State) ->
 set_clearing_mode([{timer, Time} | Rest], State) ->
     set_clearing_mode(Rest, set_timer(Time, State));
 set_clearing_mode([{timeout, Time} | Rest], State) ->
-    exit('not implemented'),
-    %% TODO start a timer
-    State;
+    set_clearing_mode(Rest, set_timeout(Time, State));
 set_clearing_mode([{bidcount, Count} | Rest], State) ->
     exit('not implemented'),
     %% TODO
@@ -362,6 +381,19 @@ set_clearing_mode([{askcount, Count} | Rest], State) ->
     %% TODO
     State.
 
+reset_timeout(#state{timeout = {_TRef, _Ref, Time}} = State) ->
+    set_timeout(Time, cancel_timeout(State));
+reset_timeout(State) ->
+    State.
+
+set_timeout(infinity, State) ->
+    cancel_timeout(State);
+set_timeout(Time, State) ->
+    State1 = cancel_timeout(State),
+    Ref = erlang:make_ref(),
+    {ok, TRef} = timer:send_after(Time, {'$clear', {timeout, Ref}}),
+    State1#state{timeout = {TRef, Ref, Time}}.
+
 set_timer(infinity, State) ->
     cancel_timer(State);
 set_timer(Time, State) ->
@@ -369,6 +401,12 @@ set_timer(Time, State) ->
     Ref = erlang:make_ref(),
     {ok, TRef} = timer:send_after(Time, {'$clear', {timer, Ref}}),
     State1#state{timer = {TRef, Ref}}.
+
+cancel_timeout(#state{timeout = {TRef, _Ref, _Time}} = State) ->
+    timer:cancel(TRef),
+    State#state{timeout = undefined};
+cancel_timeout(State) ->
+    State.
 
 cancel_timer(#state{timer = {TRef, _Ref}} = State) ->
     timer:cancel(TRef),

@@ -34,6 +34,13 @@ init_per_group(Name, Config) when Name =:= accepted; Name =:= rejected ->
     [{expected, Name} | Config];
 init_per_group(timer, Config) ->
     [{time, 500}, {init, {{timer, 500}, {9, 2}}} | Config];
+init_per_group(timeout, Config) ->
+    [
+        {time, 500},
+        {init, {{timeout, 500}, {9, 2}}},
+        {options, [{duplicate, allow}]}
+        | Config
+    ];
 init_per_group(_Name, Config) ->
     Config.
 
@@ -98,9 +105,104 @@ groups() ->
         {accepted, [parallel], [clear]},
         {rejected, [parallel], [clear]},
 
-        {auto, [parallel], [{group, timer}]},
-        {timer, [parallel], [clear_timer, cancel_timer]}
+        {auto, [parallel], [{group, timer}, {group, timeout}]},
+        {timer, [parallel], [clear_timer, cancel_timer, restart_timer]},
+        {timeout, [parallel], [clear_timeout, cancel_timeout, restart_timeout]}
     ].
+
+clear_timeout() ->
+    [{doc, "returning `{timeout, Time}` action from `init/1` starts a clearing timeout"}].
+clear_timeout(Config) ->
+    Auction = ?config(auction, Config),
+    Reserve = ?config(reserve, Config),
+    Time = ?config(time, Config),
+    timer:sleep((Time div 5) * 3),
+    accepted = gen_auction:bid(Auction, Reserve + 1),
+    timer:sleep((Time div 5) * 3),
+    accepted = gen_auction:bid(Auction, Reserve + 3),
+    Start = erlang:monotonic_time(millisecond),
+    timer:sleep(Time div 5),
+    rejected = gen_auction:bid(Auction, Reserve + 4),
+    [
+        receive
+            {gen_auction, Auction, {Result, Bid, [], R}} when
+                Bid =:= Reserve + N,
+                R =:= Reserve + 3
+            ->
+                End = erlang:monotonic_time(millisecond),
+                Delay = End - Start,
+                ?assert(abs(Delay - Time) < Time * 0.01),
+                if
+                    N =:= 1 -> ?assertEqual(loser, Result);
+                    N =:= 3 -> ?assertEqual(winner, Result)
+                end
+        after Time * 2 ->
+            ct:fail("auction did not clear correctly")
+        end
+     || N <- [1, 3]
+    ].
+
+restart_timeout() ->
+    [{doc, "timeout can be restarted after it is canceled"}].
+restart_timeout(Config) ->
+    Auction = ?config(auction, Config),
+    Reserve = ?config(reserve, Config),
+    Time = ?config(time, Config),
+    accepted = gen_auction:bid(Auction, Reserve + 1),
+    Auction ! cancel_timeout,
+    receive
+        Msg -> ct:fail("received unexected message: ~p", [Msg])
+    after Time + 100 -> ok
+    end,
+    rejected = gen_auction:bid(Auction, {rejected, [{timer, Time}], Reserve + 10}),
+    receive
+        {gen_auction, Auction, {winner, Max, _, Max}} when Max =:= Reserve + 1 ->
+            ok
+    after Time + (Time div 2) ->
+        ct:fail("auction did not clear")
+    end.
+
+cancel_timeout() ->
+    [{doc, "clearing timeout is canceled by returning a `{timeout, infinigy}` action"}].
+cancel_timeout(Config) ->
+    Auction = ?config(auction, Config),
+    Reserve = ?config(reserve, Config),
+    Time = ?config(time, Config),
+    gen_auction:bid(Auction, Reserve + 1),
+    Auction ! cancel_timeout,
+    receive
+        Any ->
+            ct:fail("Gor unexpected message: ~p", [Any])
+    after Time + (Time div 2) ->
+        ok
+    end,
+    gen_auction:clear(Auction),
+    receive
+        {gen_auction, Auction, {winner, _, _, _}} ->
+            ok
+    after 100 ->
+        ct:fail("auction not cleared")
+    end.
+
+restart_timer() ->
+    [{doc, "timer can be restarted after it is canceled"}].
+restart_timer(Config) ->
+    Auction = ?config(auction, Config),
+    Reserve = ?config(reserve, Config),
+    Time = ?config(time, Config),
+    accepted = gen_auction:bid(Auction, Reserve + 1),
+    Auction ! cancel_timer,
+    receive
+        Msg -> ct:fail("received unexected message: ~p", [Msg])
+    after Time + 100 -> ok
+    end,
+    rejected = gen_auction:bid(Auction, {rejected, [{timer, Time}], Reserve + 10}),
+    receive
+        {gen_auction, Auction, {winner, Max, _, Max}} when Max =:= Reserve + 1 ->
+            ok
+    after Time + (Time div 2) ->
+        ct:fail("auction did not clear")
+    end.
 
 cancel_timer() ->
     [{doc, "clearing timer is canceled by returning a `{timer, infinity}` action"}].
@@ -115,14 +217,14 @@ cancel_timer(Config) ->
         Any ->
             ct:fail("Got unexpected message: ~p", [Any])
     after Time + 100 ->
-            ok
+        ok
     end,
     gen_auction:clear(Auction),
     receive
         {gen_auction, Auction, {winner, _, _, _}} ->
             ok
     after 100 ->
-            ct:fail("auction was not cleared")
+        ct:fail("auction was not cleared")
     end.
 
 clear_timer() ->

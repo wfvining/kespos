@@ -23,7 +23,9 @@ start_link(Reserve, Increment, Options) ->
 
 init({{timer, Time}, {Reserve, Increment}}) ->
     {ok, {0, Increment, Reserve}, [{timer, Time}]};
-init({Reserve, Increment}) ->
+init({{timeout, Time}, {Reserve, Increment}}) ->
+    {ok, {0, Increment, Reserve}, [{timeout, Time}]};
+init({Reserve, Increment}) when is_number(Reserve), is_number(Increment) ->
     {ok, {0, Increment, Reserve}}.
 
 handle_bid({_BidId, {accepted, Actions, BidAmount}}, _Metadata, {_Last, Increment, Reserve}) ->
@@ -48,7 +50,9 @@ clear([], Asks, State) ->
     {cleared, {[], Winners, Data}, State}.
 
 handle_info(cancel_timer, State) ->
-    {ok, State, [{timer, infinity}]}.
+    {ok, State, [{timer, infinity}]};
+handle_info(cancel_timeout, State) ->
+    {ok, State, [{timeout, infinity}]}.
 
 do_clear(_, {Last, _, Reserve}) when Last < Reserve ->
     {[], Reserve};
