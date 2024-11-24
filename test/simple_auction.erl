@@ -21,10 +21,8 @@ start_link(Reserve, Increment) ->
 start_link(Reserve, Increment, Options) ->
     gen_auction:start_link(?MODULE, {Reserve, Increment}, Options).
 
-init({{timer, Time}, {Reserve, Increment}}) ->
-    {ok, {0, Increment, Reserve}, [{timer, Time}]};
-init({{timeout, Time}, {Reserve, Increment}}) ->
-    {ok, {0, Increment, Reserve}, [{timeout, Time}]};
+init({ClearingOptions, {Reserve, Increment}}) ->
+    {ok, {0, Increment, Reserve}, ClearingOptions};
 init({Reserve, Increment}) when is_number(Reserve), is_number(Increment) ->
     {ok, {0, Increment, Reserve}}.
 
@@ -46,6 +44,10 @@ clear(Bids, [], State) ->
     {Winners, Data} = do_clear(Bids, State),
     {cleared, {Winners, [], Data}, State};
 clear([], Asks, State) ->
+    {Winners, Data} = do_clear(Asks, State),
+    {cleared, {[], Winners, Data}, State};
+clear(_Bids, Asks, State) ->
+    %% bidders all lose
     {Winners, Data} = do_clear(Asks, State),
     {cleared, {[], Winners, Data}, State}.
 

@@ -7,7 +7,13 @@
 -include_lib("stdlib/include/assert.hrl").
 
 suite() ->
-    [{timetrap, {seconds, 5000}}].
+    [{timetrap, {seconds, 10}}].
+
+init_per_suite(Config) ->
+    [{options, []}, {reserve, 9}, {increment, 2} | Config].
+
+end_per_suite(_) ->
+    ok.
 
 init_per_group(Name, Config) when Name =:= bid; Name =:= ask ->
     [{bidask, Name} | Config];
@@ -29,11 +35,15 @@ init_per_group(Name, Config) when
 init_per_group(Name, Config) when Name =:= accepted; Name =:= rejected ->
     [{expected, Name} | Config];
 init_per_group(timer, Config) ->
-    [{time, 500}, {init, {{timer, 500}, {9, 2}}} | Config];
+    [
+        {time, 500},
+        {init, {[{timer, 500}], {?config(reserve, Config), ?config(increment, Config)}}}
+        | Config
+    ];
 init_per_group(timeout, Config) ->
     [
         {time, 500},
-        {init, {{timeout, 500}, {9, 2}}},
+        {init, {[{timeout, 500}], {?config(reserve, Config), ?config(increment, Config)}}},
         {options, [{duplicate, allow}]}
         | Config
     ];
@@ -67,21 +77,36 @@ expected(_) ->
 end_per_group(_, Config) ->
     Config.
 
+init_per_testcase(clear_bidcount, Config) ->
+    Options = ?config(options, Config),
+    BidCount = 2,
+    Init = {[{bidcount, BidCount}], {?config(reserve, Config), ?config(increment, Config)}},
+    {ok, Pid} = gen_auction:start_link(simple_auction, Init, Options),
+    [{auction, Pid}, {bidcount, BidCount} | Config];
+init_per_testcase(clear_askcount, Config) ->
+    Options = ?config(options, Config),
+    AskCount = 2,
+    Init = {[{askcount, AskCount}], {?config(reserve, Config), ?config(increment, Config)}},
+    {ok, Pid} = gen_auction:start_link(simple_auction, Init, Options),
+    [{auction, Pid}, {askcount, AskCount} | Config];
+init_per_testcase(clear_bidaskcount, Config) ->
+    AskCount = 1,
+    BidCount = 1,
+    Init = {[{askcount, AskCount}, {bidcount, BidCount}], {
+        ?config(reserve, Config), ?config(increment, Config)
+    }},
+    {ok, Pid} = gen_auction:start_link(simple_auction, Init, ?config(options, Config)),
+    [{bidcount, BidCount}, {askcount, AskCount}, {auction, Pid} | Config];
 init_per_testcase(_Case, Config) ->
-    Options =
-        case ?config(options, Config) of
-            undefined -> [];
-            Opts -> Opts
-        end,
-    Reserve = 9,
+    Options = ?config(options, Config),
     Init =
         case ?config(init, Config) of
-            undefined -> {Reserve, 2};
+            undefined -> {?config(reserve, Config), ?config(increment, Config)};
             Init_ -> Init_
         end,
     {ok, Pid} = gen_auction:start_link(simple_auction, Init, Options),
     Start = erlang:monotonic_time(millisecond),
-    [{auction, Pid}, {reserve, Reserve}, {start, Start} | Config].
+    [{auction, Pid}, {start, Start} | Config].
 
 end_per_testcase(_Case, Config) ->
     gen_auction:stop(?config(auction, Config)).
@@ -101,10 +126,66 @@ groups() ->
         {accepted, [parallel], [clear]},
         {rejected, [parallel], [clear]},
 
-        {auto, [parallel], [{group, timer}, {group, timeout}]},
+        {auto, [parallel], [{group, timer}, {group, timeout}, {group, counts}]},
         {timer, [parallel], [clear_timer, cancel_timer, restart_timer]},
-        {timeout, [parallel], [clear_timeout, cancel_timeout, restart_timeout]}
+        {timeout, [parallel], [clear_timeout, cancel_timeout, restart_timeout]},
+        {counts, [parallel], [clear_bidcount, clear_askcount, clear_bidaskcount]}
     ].
+
+clear_bidcount(Config) ->
+    clear_count(bid, bid, Config).
+
+clear_askcount(Config) ->
+    clear_count(ask, ask, Config).
+
+clear_bidaskcount(Config) ->
+    clear_count(bid, ask, Config).
+
+clear_count(Op, OtherOp, Config) ->
+    Auction = ?config(auction, Config),
+    Reserve = ?config(reserve, Config),
+    Increment = ?config(increment, Config),
+    ?assert(Increment > 1),
+    %% BidCount = ?config(bidcount, Config),
+    %% The bid count should remain 1 through all these operations
+    accepted = gen_auction:Op(Auction, Reserve - 1),
+    updated = gen_auction:Op(Auction, Reserve + Increment),
+    rejected = gen_auction:Op(Auction, Reserve + Increment + 1),
+    receive
+        Any ->
+            ct:fail("unexpected message: ~p", [Any])
+    after 50 ->
+        ok
+    end,
+    Self = self(),
+    _Pid = spawn_link(
+        fun() ->
+            accepted = gen_auction:OtherOp(Auction, Reserve + 2 * Increment),
+            receive
+                {gen_auction, Auction, {winner, Bid, _, Bid}} when
+                    Bid =:= Reserve + 2 * Increment
+                ->
+                    ok;
+                Any1 ->
+                    ct:fail("unexpected message: ~p, expected Bid = ~p", [
+                        Any1, Reserve + 2 * Increment
+                    ])
+            after 200 ->
+                ct:fail("auction failed to clear")
+            end,
+            Self ! done
+        end
+    ),
+    receive
+        {gen_auction, Auction, {loser, Bid, _, _Max}} when Bid =:= Reserve + Increment ->
+            ok
+    after 200 ->
+        ct:fail("aution failed to clear")
+    end,
+    receive
+        done -> ok
+    after 200 -> ct:fail("other bidder process failed")
+    end.
 
 clear_timeout() ->
     [{doc, "returning `{timeout, Time}` action from `init/1` starts a clearing timeout"}].
@@ -112,18 +193,19 @@ clear_timeout(Config) ->
     Auction = ?config(auction, Config),
     Reserve = ?config(reserve, Config),
     Time = ?config(time, Config),
+    Increment = ?config(increment, Config),
     timer:sleep((Time div 5) * 3),
     accepted = gen_auction:bid(Auction, Reserve + 1),
     timer:sleep((Time div 5) * 3),
-    accepted = gen_auction:bid(Auction, Reserve + 3),
+    accepted = gen_auction:bid(Auction, Reserve + Increment + 1),
     Start = erlang:monotonic_time(millisecond),
     timer:sleep(Time div 5),
-    rejected = gen_auction:bid(Auction, Reserve + 4),
+    rejected = gen_auction:bid(Auction, Reserve + (2 * Increment) - 1),
     [
         receive
             {gen_auction, Auction, {Result, Bid, [], R}} when
                 Bid =:= Reserve + N,
-                R =:= Reserve + 3
+                R =:= Reserve + Increment + 1
             ->
                 End = erlang:monotonic_time(millisecond),
                 Delay = End - Start,
@@ -143,6 +225,7 @@ restart_timeout() ->
 restart_timeout(Config) ->
     Auction = ?config(auction, Config),
     Reserve = ?config(reserve, Config),
+    Increment = ?config(increment, Config),
     Time = ?config(time, Config),
     accepted = gen_auction:bid(Auction, Reserve + 1),
     Auction ! cancel_timeout,
@@ -150,7 +233,7 @@ restart_timeout(Config) ->
         Msg -> ct:fail("received unexected message: ~p", [Msg])
     after Time + 100 -> ok
     end,
-    rejected = gen_auction:bid(Auction, {rejected, [{timer, Time}], Reserve + 10}),
+    rejected = gen_auction:bid(Auction, {rejected, [{timer, Time}], Reserve + Increment * 10}),
     receive
         {gen_auction, Auction, {winner, Max, _, Max}} when Max =:= Reserve + 1 ->
             ok
@@ -185,6 +268,7 @@ restart_timer() ->
 restart_timer(Config) ->
     Auction = ?config(auction, Config),
     Reserve = ?config(reserve, Config),
+    Increment = ?config(increment, Config),
     Time = ?config(time, Config),
     accepted = gen_auction:bid(Auction, Reserve + 1),
     Auction ! cancel_timer,
@@ -192,7 +276,7 @@ restart_timer(Config) ->
         Msg -> ct:fail("received unexected message: ~p", [Msg])
     after Time + 100 -> ok
     end,
-    rejected = gen_auction:bid(Auction, {rejected, [{timer, Time}], Reserve + 10}),
+    rejected = gen_auction:bid(Auction, {rejected, [{timer, Time}], Reserve + (Increment * 10)}),
     receive
         {gen_auction, Auction, {winner, Max, _, Max}} when Max =:= Reserve + 1 ->
             ok
@@ -248,7 +332,7 @@ clear(Config) ->
     BidAsk = ?config(bidask, Config),
     ExpectedResponse = ?config(expected, Config),
     Reserve = ?config(reserve, Config),
-    Increment = ?config(reserve, Config),
+    Increment = ?config(increment, Config),
     BidAmount = (Reserve + Increment) * 2,
     {ExpectedOutcome, WinningBid, ExpectedMax} =
         if

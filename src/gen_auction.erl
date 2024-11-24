@@ -178,7 +178,9 @@ when
     asks = #{} :: #{bidid() => {any(), any(), pid()}},
     askers = #{} :: #{pid() => bidid()},
     timer :: undefined | {timer:tref(), reference()},
-    timeout :: undefined | {timer:tref(), reference(), pos_integer()}
+    timeout :: undefined | {timer:tref(), reference(), pos_integer()},
+    bidcount = infinity :: infinity | pos_integer(),
+    askcount = infinity :: infinity | pos_integer()
 }).
 
 -doc """
@@ -337,16 +339,17 @@ handle_call({bid, Bid, Metadata, BidderPid, BidderAlias}, _From, State) ->
                 {continue, {after_bidask, bid, Result, Actions}}}
     end.
 
-handle_continue({after_bidask, BidAsk, Result, Actions}, State) ->
-    NewState = do_actions(Actions, State),
-    case Result of
-        {updated, _} ->
-            %% TODO check bid/ask counts
-            {noreply, reset_timeout(NewState)};
-        accepted ->
-            %% TODO check bid/ask counts
-            {noreply, reset_timeout(NewState)};
-        rejected ->
+check_counts(#state{bidcount = BidCount, askcount = AskCount} = State) ->
+    (BidCount =/= infinity orelse AskCount =/= infinity) andalso
+        (BidCount =:= infinity orelse map_size(State#state.bids) >= BidCount) andalso
+        (AskCount =:= infinity orelse map_size(State#state.asks) >= AskCount).
+
+handle_continue({after_bidask, _BidAsk, Result, Actions}, State) ->
+    NewState = reset_timeout(Result, do_actions(Actions, State)),
+    case check_counts(NewState) of
+        true ->
+            {noreply, do_actions([clear], State)};
+        false ->
             {noreply, NewState}
     end;
 handle_continue({do_actions, Actions}, State) ->
@@ -381,7 +384,13 @@ do_actions(Actions, State) ->
             {MoreActions, NewState} = do_clear(State),
             do_actions(lists:delete(clear, Actions) ++ MoreActions, NewState);
         false ->
-            set_clearing_mode(Actions, State)
+            NewState = set_clearing_mode(Actions, State),
+            case check_counts(NewState) of
+                true ->
+                    do_actions([clear], NewState);
+                false ->
+                    NewState
+            end
     end.
 
 do_clear(#state{module = Module} = State) ->
@@ -404,13 +413,13 @@ set_clearing_mode([{timer, Time} | Rest], State) ->
 set_clearing_mode([{timeout, Time} | Rest], State) ->
     set_clearing_mode(Rest, set_timeout(Time, State));
 set_clearing_mode([{bidcount, Count} | Rest], State) ->
-    set_clearing_mode(Rest, State#state#{bidcount = Count});
+    set_clearing_mode(Rest, State#state{bidcount = Count});
 set_clearing_mode([{askcount, Count} | Rest], State) ->
     set_clearing_mode(Rest, State#state{askcount = Count}).
 
-reset_timeout(#state{timeout = {_TRef, _Ref, Time}} = State) ->
+reset_timeout(Result, #state{timeout = {_TRef, _Ref, Time}} = State) when Result =/= rejected ->
     set_timeout(Time, cancel_timeout(State));
-reset_timeout(State) ->
+reset_timeout(_, State) ->
     State.
 
 set_timeout(infinity, State) ->
