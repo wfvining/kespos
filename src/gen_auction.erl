@@ -1,6 +1,37 @@
 -module(gen_auction).
 -moduledoc """
 A generic auction behavior.
+
+## Automatic Clearing
+
+Auctions may be configured to clear automatically either via options passed to
+`start_link/4` or via actions returned from the callback functions. Timers for
+timer-based clearing options passed to `start_link/4` are started immediately
+after the `c:init/1` callback returns. The supported clearing modes are defined
+in `t:clearing_mode/0`. The default mode is `manual` which means clearing only
+happens in response to a `clear/1` call or when a callback returns the `clear`
+action. `{bidcount, N}` or `{askcount, N}` mean the auction will be cleared
+immediately after there are `N` accepted bids or asks respectively. Both of
+these options may be specified in which case both conditions must be satisfied
+before clearing is triggered.
+
+There are also two timer-based clearing modes. The `{timer, T}` mode sets an
+absolute timer for `T` milliseconds which triggers clearing when it expires. In
+this mode the timer is only reset if a callback returns a new time via the
+`{timer, TNew}` action which causes the old timer (if it exists) to be canceled
+and a new timer to be started. The `{timeout, T}` mode starts a timer that is
+reset after each accepted bid or ask, thus it expires when there have been no
+new bids or asks for `T` milliseconds. As with `timer`, the `timeout` timer may
+be reset or canceled by returning a `{timeout, TNew}` action. If `TNew` is
+`infinity` the timer is canceled and a new one is not started.
+
+By default when an auction is cleared, either manually or by an automatic
+mechanism, all pending timers are canceled. This can be changed by using the
+`{timer_mode, Mode}` and `{timeout_mode, Mode}` options when starting the
+auction. The `Mode` parameter can be one of `cancel` (the default), `keep` (any
+pending timers are left running), or `restart` (all pending timers are restarted
+with their original duration).
+
 """.
 
 -behaviour(gen_server).
@@ -373,13 +404,9 @@ set_clearing_mode([{timer, Time} | Rest], State) ->
 set_clearing_mode([{timeout, Time} | Rest], State) ->
     set_clearing_mode(Rest, set_timeout(Time, State));
 set_clearing_mode([{bidcount, Count} | Rest], State) ->
-    exit('not implemented'),
-    %% TODO
-    State;
+    set_clearing_mode(Rest, State#state#{bidcount = Count});
 set_clearing_mode([{askcount, Count} | Rest], State) ->
-    exit('not implemented'),
-    %% TODO
-    State.
+    set_clearing_mode(Rest, State#state{askcount = Count}).
 
 reset_timeout(#state{timeout = {_TRef, _Ref, Time}} = State) ->
     set_timeout(Time, cancel_timeout(State));
@@ -520,17 +547,17 @@ handle_bidask(
 ) ->
     case Module:Handler(BidAsk, Metadata, AuctionState) of
         {accepted, NewAuctionState} when is_map_key(Pid, Pids) ->
-            OldAlias = maps:get(Pid, Pids),
-            {{updated, OldAlias}, NewAuctionState, Pids#{Pid => Alias}, BidAsks#{
+            {OldAlias, Map} = maps:take(Pid, Pids),
+            {{updated, OldAlias}, NewAuctionState, Pids#{Pid => Alias}, Map#{
                 Alias => {BidAskVal, Metadata, Pid}
             }};
         {accepted, NewAuctionState, Actions} when is_map_key(Pid, Pids) ->
-            OldAlias = maps:get(Pid, Pids),
+            {OldAlias, Map} = maps:take(Pid, Pids),
             {
                 {updated, OldAlias},
                 NewAuctionState,
                 Pids#{Pid => Alias},
-                BidAsks#{Alias => {BidAskVal, Metadata, Pid}},
+                Map#{Alias => {BidAskVal, Metadata, Pid}},
                 Actions
             };
         {accepted, NewAuctionState} ->
