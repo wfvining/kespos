@@ -26,10 +26,6 @@ init_per_group(Name, Config) when
         {max, ExpectedMax}
         | Config
     ];
-init_per_group(clear_ask, Config) ->
-    [{bidask, ask} | Config];
-init_per_group(clear_bid, Config) ->
-    [{bidask, bid} | Config];
 init_per_group(Name, Config) when Name =:= accepted; Name =:= rejected ->
     [{expected, Name} | Config];
 init_per_group(timer, Config) ->
