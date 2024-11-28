@@ -25,13 +25,8 @@ new bids or asks for `T` milliseconds. As with `timer`, the `timeout` timer may
 be reset or canceled by returning a `{timeout, TNew}` action. If `TNew` is
 `infinity` the timer is canceled and a new one is not started.
 
-By default when an auction is cleared, either manually or by an automatic
-mechanism, all pending timers are canceled. This can be changed by using the
-`{timer_mode, Mode}` and `{timeout_mode, Mode}` options when starting the
-auction. The `Mode` parameter can be one of `cancel` (the default), `keep` (any
-pending timers are left running), or `restart` (all pending timers are restarted
-with their original duration).
-
+After a timer expires it is not restarted. Any actions to restart the timer, or
+to cancel other timers must be returned from the `c:clear/3` callback.
 """.
 
 -behaviour(gen_server).
@@ -61,11 +56,7 @@ with their original duration).
 -type action() :: clear | clearingmode().
 -type bidresponse() :: accepted | rejected | updated.
 -type timermode() :: cancel | keep | restart.
--type option() ::
-    {duplicate, mode()}
-    | {timer_mode, timermode()}
-    | {timeout_mode, timermode()}
-    | {clearing, clearingmode()}.
+-type option() :: {duplicate, mode()} | {clearing, clearingmode()}.
 -type clearingmode() ::
     {bidcount, pos_integer() | infinity}
     | {askcount, pos_integer() | infinity}
@@ -359,13 +350,11 @@ handle_cast(clear, State) ->
     {noreply, State, {continue, {do_actions, [clear]}}}.
 
 handle_info({'$clear', {timer, Ref}}, #state{timer = {_TRef, Ref}} = State) ->
-    %% TODO restart timers???
     {noreply, State#state{timer = undefined}, {continue, {do_actions, [clear]}}};
 handle_info({'$clear', {timer, _}}, State) ->
     %% Ref doesn't match so this is a message from a canceled timer. Ignore.
     {noreply, State};
 handle_info({'$clear', {timeout, Ref}}, #state{timeout = {_TRef, Ref, _Time}} = State) ->
-    %% TODO restart timers???
     {noreply, State#state{timeout = undefined}, {continue, {do_actions, [clear]}}};
 handle_info({'$clear', {timeout, _}}, State) ->
     {noreply, State};
